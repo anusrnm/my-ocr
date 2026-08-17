@@ -121,6 +121,7 @@ target/
 
 # Local OCR review artifacts
 .enhanced/
+.models/
 *.swo
 .DS_Store
 Thumbs.db

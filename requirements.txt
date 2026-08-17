@@ -1,4 +1,5 @@
 easyocr
+pytesseract
 PyMuPDF
 pandas
 numpy

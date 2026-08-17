@@ -9,6 +9,7 @@ independently.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from collections import Counter
@@ -21,6 +22,8 @@ import easyocr
 import numpy as np
 import pandas as pd
 import pymupdf
+
+from ocr_provider import EasyOcrProvider, OcrProvider, TesseractOcrProvider
 
 MIN_CONFIDENCE = 0.15
 SECTION_KEYWORDS = ("invoice",)
@@ -118,29 +121,22 @@ def enhance_for_ocr(img: np.ndarray) -> tuple[np.ndarray, float]:
     return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR), scale
 
 
-def read_words(reader: easyocr.Reader, img: np.ndarray) -> list[Word]:
+def read_words(reader: easyocr.Reader | OcrProvider, img: np.ndarray) -> list[Word]:
     ocr_img, scale = enhance_for_ocr(img)
+    provider = reader if hasattr(reader, "read") else EasyOcrProvider(reader)
     words = []
-    for box, text, conf in reader.readtext(
-        ocr_img,
-        detail=1,
-        mag_ratio=1.5,
-        contrast_ths=0.1,
-        adjust_contrast=0.6,
-        decoder="beamsearch",
-        beamWidth=5,
-    ):
-        if conf < MIN_CONFIDENCE or not text.strip():
+    for result in provider.read(ocr_img):
+        if result.confidence < MIN_CONFIDENCE or not result.text.strip():
             continue
-        xs = [p[0] / scale for p in box]
-        ys = [p[1] / scale for p in box]
+        xs = [point[0] / scale for point in result.box]
+        ys = [point[1] / scale for point in result.box]
         words.append(
             Word(
                 int(min(xs)),
                 int(min(ys)),
                 int(max(xs)),
                 int(max(ys)),
-                normalize_ocr_text(text.strip()),
+                normalize_ocr_text(result.text.strip()),
             )
         )
     return sorted(words, key=lambda w: (w.y1, w.x1))
@@ -356,8 +352,12 @@ def expand_paths(patterns: list[str]) -> list[str]:
     return paths
 
 
-def main(paths: list[str], save_enhanced: bool = False) -> None:
-    reader = easyocr.Reader(["en"])
+def main(paths: list[str], save_enhanced: bool = False, provider: str = "easyocr") -> None:
+    if provider == "tesseract":
+        reader = TesseractOcrProvider()
+    else:
+        model_dir = os.environ.get("OCR_MODEL_DIR", ".models/easyocr")
+        reader = easyocr.Reader(["en"], model_storage_directory=model_dir)
     enhanced_dir = DEFAULT_ENHANCED_DIR if save_enhanced else None
     for path in paths:
         for title, df in extract_tables(path, reader, enhanced_dir):
@@ -368,6 +368,12 @@ def main(paths: list[str], save_enhanced: bool = False) -> None:
 def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract invoice tables from images and PDFs.")
     parser.add_argument("paths", nargs="*", help="Input image, PDF, or glob pattern.")
+    parser.add_argument(
+        "--provider",
+        choices=("easyocr", "tesseract"),
+        default="easyocr",
+        help="OCR engine to use (default: easyocr).",
+    )
     saving = parser.add_mutually_exclusive_group()
     saving.add_argument(
         "--save-enhanced",
@@ -387,4 +393,4 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
-    main(expand_paths(args.paths or ["./sample/sample1.jpg"]), args.save_enhanced)
+    main(expand_paths(args.paths or ["./sample/sample1.jpg"]), args.save_enhanced, args.provider)
