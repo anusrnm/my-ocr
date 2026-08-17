@@ -1,2 +1,5 @@
-img2table
-img2table[easyocr]
+easyocr
+pandas
+numpy
+# cv2.ximgproc + OpenCV 4.x APIs; install exactly one OpenCV build
+opencv-contrib-python-headless==4.11.0.86
