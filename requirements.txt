@@ -1,4 +1,5 @@
 easyocr
+PyMuPDF
 pandas
 numpy
 # cv2.ximgproc + OpenCV 4.x APIs; install exactly one OpenCV build

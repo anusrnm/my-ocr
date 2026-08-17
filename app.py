@@ -12,11 +12,13 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from glob import glob
+from pathlib import Path
 
 import cv2
 import easyocr
 import numpy as np
 import pandas as pd
+import pymupdf
 
 MIN_CONFIDENCE = 0.15
 SECTION_KEYWORDS = ("invoice",)
@@ -228,10 +230,34 @@ def build_dataframe(rows: list[Word], header: list[Word], bounds: list[float]) -
     return pd.DataFrame(np.array(cell_columns, dtype=object).T, columns=[h.text for h in header])
 
 
-def extract_tables(path: str, reader: easyocr.Reader) -> list[tuple[str, pd.DataFrame]]:
-    source = cv2.imread(path)
-    if source is None:
-        raise ValueError(f"Unable to read image: {path}")
+def render_pdf_pages(path: str, dpi: int = 200) -> list[np.ndarray]:
+    """Render PDF pages to BGR images for the existing OCR pipeline."""
+    try:
+        document = pymupdf.open(path)
+    except (RuntimeError, ValueError) as exc:
+        raise ValueError(f"Unable to read PDF: {path}") from exc
+
+    if document.page_count == 0:
+        document.close()
+        raise ValueError(f"PDF has no pages: {path}")
+
+    scale = dpi / 72
+    matrix = pymupdf.Matrix(scale, scale)
+    pages = []
+    try:
+        for page in document:
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            image = np.frombuffer(pixmap.samples, dtype=np.uint8)
+            image = image.reshape(pixmap.height, pixmap.width, pixmap.n)
+            pages.append(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    finally:
+        document.close()
+    return pages
+
+
+def extract_tables_from_image(
+    source: np.ndarray, reader: easyocr.Reader
+) -> list[tuple[str, pd.DataFrame]]:
     img = deskew(crop_page(source))
     words = read_words(reader, img)
     if not words:
@@ -242,6 +268,20 @@ def extract_tables(path: str, reader: easyocr.Reader) -> list[tuple[str, pd.Data
         (title, build_dataframe(rows, header, bounds))
         for title, rows in split_sections(words, header)
     ]
+
+
+def extract_tables(path: str, reader: easyocr.Reader) -> list[tuple[str, pd.DataFrame]]:
+    if Path(path).suffix.lower() == ".pdf":
+        tables = []
+        for page_number, image in enumerate(render_pdf_pages(path), start=1):
+            for title, dataframe in extract_tables_from_image(image, reader):
+                tables.append((f"page {page_number}: {title}", dataframe))
+        return tables
+
+    source = cv2.imread(path)
+    if source is None:
+        raise ValueError(f"Unable to read image: {path}")
+    return extract_tables_from_image(source, reader)
 
 
 def expand_paths(patterns: list[str]) -> list[str]:
