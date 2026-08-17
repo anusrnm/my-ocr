@@ -22,6 +22,7 @@ import pymupdf
 
 MIN_CONFIDENCE = 0.15
 SECTION_KEYWORDS = ("invoice",)
+MIN_OCR_HEIGHT = 1600  # upscale short pages so small print stays legible to the recognizer
 
 
 @dataclass
@@ -91,13 +92,35 @@ def deskew(img: np.ndarray, limit: float = 6.0, step: float = 0.1) -> np.ndarray
     return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
 
 
+def enhance_for_ocr(img: np.ndarray) -> tuple[np.ndarray, float]:
+    """Upscale small pages and boost local contrast so faint or tiny print is legible."""
+    scale = max(MIN_OCR_HEIGHT / img.shape[0], 1.0)
+    resized = (
+        cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        if scale > 1.0
+        else img
+    )
+    l, a, b = cv2.split(cv2.cvtColor(resized, cv2.COLOR_BGR2LAB))
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR), scale
+
+
 def read_words(reader: easyocr.Reader, img: np.ndarray) -> list[Word]:
+    ocr_img, scale = enhance_for_ocr(img)
     words = []
-    for box, text, conf in reader.readtext(img, detail=1):
+    for box, text, conf in reader.readtext(
+        ocr_img,
+        detail=1,
+        mag_ratio=1.5,
+        contrast_ths=0.1,
+        adjust_contrast=0.6,
+        decoder="beamsearch",
+        beamWidth=5,
+    ):
         if conf < MIN_CONFIDENCE or not text.strip():
             continue
-        xs = [p[0] for p in box]
-        ys = [p[1] for p in box]
+        xs = [p[0] / scale for p in box]
+        ys = [p[1] / scale for p in box]
         words.append(Word(int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)), text.strip()))
     return sorted(words, key=lambda w: (w.y1, w.x1))
 
