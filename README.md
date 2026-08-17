@@ -59,7 +59,14 @@ With no arguments, the program processes `./sample/sample1.jpg`.
 ## Output
 
 Results are printed to the terminal. Each table is labeled with its source path and,
-for PDF input, its page number:
+for PDF input, its page number. Enhanced PNG copies are not saved by default. Enable
+offline review images under the ignored `./.enhanced/` folder with:
+
+```powershell
+python app.py --save-enhanced invoice.pdf
+```
+
+Use `--no-save-enhanced` to explicitly disable saving:
 
 ```text
 === invoice.pdf :: page 1: Part Invoice ... ===

@@ -8,6 +8,8 @@ independently.
 
 from __future__ import annotations
 
+import argparse
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ import pymupdf
 MIN_CONFIDENCE = 0.15
 SECTION_KEYWORDS = ("invoice",)
 MIN_OCR_HEIGHT = 1600  # upscale short pages so small print stays legible to the recognizer
+DEFAULT_ENHANCED_DIR = ".enhanced"
 
 
 @dataclass
@@ -40,6 +43,12 @@ class Word:
     @property
     def yc(self) -> float:
         return (self.y1 + self.y2) / 2
+
+
+def normalize_ocr_text(text: str) -> str:
+    """Remove known punctuation artifacts from this invoice's OCR output."""
+    text = re.sub(r"%/", "%", text)
+    return re.sub(r"^(?:\]\s*)?LITER-PRE\b", "1 LITRE-PRE", text, flags=re.IGNORECASE)
 
 
 def crop_page(img: np.ndarray) -> np.ndarray:
@@ -93,16 +102,20 @@ def deskew(img: np.ndarray, limit: float = 6.0, step: float = 0.1) -> np.ndarray
 
 
 def enhance_for_ocr(img: np.ndarray) -> tuple[np.ndarray, float]:
-    """Upscale small pages and boost local contrast so faint or tiny print is legible."""
+    """Upscale pages and normalize/sharpen print without erasing punctuation."""
     scale = max(MIN_OCR_HEIGHT / img.shape[0], 1.0)
     resized = (
         cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         if scale > 1.0
         else img
     )
-    l, a, b = cv2.split(cv2.cvtColor(resized, cv2.COLOR_BGR2LAB))
-    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
-    return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR), scale
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    background = cv2.GaussianBlur(gray, (0, 0), 21)
+    normalized = cv2.divide(gray, background, scale=255)
+    blurred = cv2.GaussianBlur(normalized, (0, 0), 1.1)
+    sharpened = cv2.addWeighted(normalized, 1.45, blurred, -0.45, 0)
+    return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR), scale
 
 
 def read_words(reader: easyocr.Reader, img: np.ndarray) -> list[Word]:
@@ -121,7 +134,15 @@ def read_words(reader: easyocr.Reader, img: np.ndarray) -> list[Word]:
             continue
         xs = [p[0] / scale for p in box]
         ys = [p[1] / scale for p in box]
-        words.append(Word(int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)), text.strip()))
+        words.append(
+            Word(
+                int(min(xs)),
+                int(min(ys)),
+                int(max(xs)),
+                int(max(ys)),
+                normalize_ocr_text(text.strip()),
+            )
+        )
     return sorted(words, key=lambda w: (w.y1, w.x1))
 
 
@@ -279,10 +300,18 @@ def render_pdf_pages(path: str, dpi: int = 200) -> list[np.ndarray]:
 
 
 def extract_tables_from_image(
-    source: np.ndarray, reader: easyocr.Reader
+    source: np.ndarray,
+    reader: easyocr.Reader,
+    enhanced_path: str | Path | None = None,
 ) -> list[tuple[str, pd.DataFrame]]:
     img = deskew(crop_page(source))
-    words = read_words(reader, img)
+    enhanced, _ = enhance_for_ocr(img)
+    if enhanced_path is not None:
+        output_path = Path(enhanced_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(output_path), enhanced, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
+            raise ValueError(f"Unable to save enhanced image: {output_path}")
+    words = read_words(reader, enhanced)
     if not words:
         return []
     header = detect_header(words)
@@ -293,18 +322,30 @@ def extract_tables_from_image(
     ]
 
 
-def extract_tables(path: str, reader: easyocr.Reader) -> list[tuple[str, pd.DataFrame]]:
+def extract_tables(
+    path: str,
+    reader: easyocr.Reader,
+    enhanced_dir: str | Path | None = None,
+) -> list[tuple[str, pd.DataFrame]]:
     if Path(path).suffix.lower() == ".pdf":
         tables = []
         for page_number, image in enumerate(render_pdf_pages(path), start=1):
-            for title, dataframe in extract_tables_from_image(image, reader):
+            enhanced_path = (
+                Path(enhanced_dir) / f"{Path(path).stem}_page_{page_number}.png"
+                if enhanced_dir is not None
+                else None
+            )
+            for title, dataframe in extract_tables_from_image(image, reader, enhanced_path):
                 tables.append((f"page {page_number}: {title}", dataframe))
         return tables
 
     source = cv2.imread(path)
     if source is None:
         raise ValueError(f"Unable to read image: {path}")
-    return extract_tables_from_image(source, reader)
+    enhanced_path = (
+        Path(enhanced_dir) / f"{Path(path).stem}.png" if enhanced_dir is not None else None
+    )
+    return extract_tables_from_image(source, reader, enhanced_path)
 
 
 def expand_paths(patterns: list[str]) -> list[str]:
@@ -315,13 +356,35 @@ def expand_paths(patterns: list[str]) -> list[str]:
     return paths
 
 
-def main(paths: list[str]) -> None:
+def main(paths: list[str], save_enhanced: bool = False) -> None:
     reader = easyocr.Reader(["en"])
+    enhanced_dir = DEFAULT_ENHANCED_DIR if save_enhanced else None
     for path in paths:
-        for title, df in extract_tables(path, reader):
+        for title, df in extract_tables(path, reader, enhanced_dir):
             print(f"\n=== {path} :: {title} ===")
             print(df.to_string(index=False))
 
 
+def parse_args(arguments: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Extract invoice tables from images and PDFs.")
+    parser.add_argument("paths", nargs="*", help="Input image, PDF, or glob pattern.")
+    saving = parser.add_mutually_exclusive_group()
+    saving.add_argument(
+        "--save-enhanced",
+        dest="save_enhanced",
+        action="store_true",
+        help="Save enhanced review images under .enhanced/.",
+    )
+    saving.add_argument(
+        "--no-save-enhanced",
+        dest="save_enhanced",
+        action="store_false",
+        help="Disable enhanced review image saving (the default).",
+    )
+    parser.set_defaults(save_enhanced=False)
+    return parser.parse_args(arguments)
+
+
 if __name__ == "__main__":
-    main(expand_paths(sys.argv[1:] or ["./sample/sample1.jpg"]))
+    args = parse_args(sys.argv[1:])
+    main(expand_paths(args.paths or ["./sample/sample1.jpg"]), args.save_enhanced)

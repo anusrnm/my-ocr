@@ -5,7 +5,18 @@ import easyocr
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from app import extract_tables
+from app import extract_tables, normalize_ocr_text, parse_args
+
+
+class OcrTextNormalizationTest(unittest.TestCase):
+    def test_repairs_invoice_punctuation_artifacts(self):
+        self.assertEqual(normalize_ocr_text("] LITER-PRE MIX"), "1 LITRE-PRE MIX")
+        self.assertEqual(normalize_ocr_text("18%/"), "18%")
+
+    def test_enhanced_image_saving_is_opt_in(self):
+        self.assertFalse(parse_args(["sample/sample1.jpg"]).save_enhanced)
+        self.assertTrue(parse_args(["--save-enhanced", "sample/sample1.jpg"]).save_enhanced)
+        self.assertFalse(parse_args(["--no-save-enhanced"]).save_enhanced)
 
 
 class SampleImageTest(unittest.TestCase):

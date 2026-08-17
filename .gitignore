@@ -118,6 +118,9 @@ target/
 .vscode/
 .idea/
 *.swp
+
+# Local OCR review artifacts
+.enhanced/
 *.swo
 .DS_Store
 Thumbs.db
